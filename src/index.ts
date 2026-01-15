@@ -1,5 +1,5 @@
-import express from 'express';
-import cors from 'cors';
+import express from "express";
+import cors from "cors";
 
 // Create the Express app
 const app = express();
@@ -9,16 +9,16 @@ app.use(cors());
 app.use(express.json());
 
 // root check endpoint - to verify the service is running
-app.get('/', (_req, res) => {
+app.get("/", (_req, res) => {
   res.json({
-    status: 'healthy',
-    service: 'TODA MAX AI Service',
+    status: "healthy",
+    service: "TODA MAX AI Service",
     timestamp: new Date().toISOString(),
   });
 });
 
 // Start the server
-const PORT = process.env['PORT'] || 3001;
+const PORT = process.env["PORT"] || 3001;
 app.listen(PORT, () => {
   console.log(` AI Service running on http://localhost:${PORT}`);
 });
