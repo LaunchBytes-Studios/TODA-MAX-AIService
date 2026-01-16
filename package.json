@@ -6,7 +6,11 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "npx ts-node src/index.ts"
+    "dev": "npx ts-node src/index.ts",
+    "lint": "eslint \"src/**/*.{js,ts,mjs,cjs,cts,mts}\"",
+    "lint:fix": "eslint \"src/**/*.{js,ts,mjs,cjs,cts,mts}\" --fix",
+    "format": "prettier --write \"src/**/*.{js,ts,mjs,cjs,cts,mts}\"",
+    "prepare": "husky install"
   },
   "keywords": [],
   "author": "",
@@ -20,11 +24,27 @@
     "zod": "^4.3.5"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.2",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.0.3",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.0.0",
+    "globals": "^17.0.0",
+    "husky": "^9.1.7",
+    "jiti": "^2.6.1",
+    "lint-staged": "^16.2.7",
     "nodemon": "^3.1.11",
+    "prettier": "^3.7.4",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.52.0"
+  },
+  "lint-staged": {
+    "*.{ts,js,cts,mts}": [
+      "eslint --fix",
+      "prettier --write"
+    ]
   }
 }
