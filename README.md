@@ -35,6 +35,14 @@ TODA MAX AI Service delivers conversational support for patients managing hypert
 	npm run dev
 	```
 
+## Environment Variables
+
+Set the following variables in your environment or a local `.env` file:
+
+- `OPENAI_API_KEY`: OpenAI API key for chat completions
+- `AI_SERVICE_KEY`: Shared service key used by the backend to call this service
+- `PORT`: Optional override for the default port (3001)
+
 ## Scripts
 
 - `npm run dev`: Start the API in watch mode with ts-node
