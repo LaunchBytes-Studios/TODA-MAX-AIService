@@ -1,3 +1,55 @@
+// detect if message is about food/diet
+const foodKeywords = [
+  "food",
+  "diet",
+  "eat",
+  "eating",
+  "meal",
+  "meals",
+  "nutrition",
+  "nutritional",
+  "carbohydrate",
+  "carbohydrates",
+  "sugar",
+  "sweet",
+  "sweetened",
+  "rice",
+  "bread",
+  "fruit",
+  "fruits",
+  "vegetable",
+  "vegetables",
+  "protein",
+  "fat",
+  "fats",
+  "snack",
+  "snacks",
+  "drink",
+  "drinks",
+  "beverage",
+  "beverages",
+  "menu",
+  "dish",
+  "dishes",
+  "cuisine",
+  "calorie",
+  "calories",
+  "fiber",
+  "glycemic",
+  "index",
+  "portion",
+  "serving",
+  "servings",
+  "consume",
+  "consumption",
+  "restriction",
+  "restricted",
+  "forbidden",
+];
+const isFoodRelatedMessage = (message: string): boolean => {
+  const normalized = message.toLowerCase();
+  return foodKeywords.some((keyword) => normalized.includes(keyword));
+};
 import { gemini } from "../../utils/lib/gemini";
 
 type ChatRole = "patient" | "chatbot";
@@ -53,7 +105,7 @@ const DEFAULT_REFUSAL_TEXT =
 const getRefusalText = (language: string) => {
   const normalized = language.trim().toLowerCase();
   if (normalized === "hiligaynon" || normalized === "ilonggo") {
-    return "Pasensya, indi ko masabat imo pamangkot. Palihog hulat sa eNavigator para mabuligan yaka..";
+    return "Pasensya, indi ko masabat imo pamangkot. Palihog hulat sa eNavigator para mabuligan ka.";
   }
   if (normalized === "filipino" || normalized === "tagalog") {
     return "Paumanhin, hindi ko masasagot ang tanong mo. Mangyaring maghintay sa eNavigator para sa tulong.";
@@ -89,6 +141,31 @@ const isHealthRelatedMessage = (message: string): boolean => {
   return healthKeywordPatterns.some((keyword) => normalized.includes(keyword));
 };
 
+const hasSupportedDiagnosis = (patient?: PatientContext): boolean => {
+  if (!patient?.diagnosis) {
+    return false;
+  }
+
+  return Boolean(patient.diagnosis.diabetes || patient.diagnosis.hypertension);
+};
+
+const getDiagnosisScope = (patient?: PatientContext): string => {
+  const diagnoses: string[] = [];
+
+  if (patient?.diagnosis?.diabetes) {
+    diagnoses.push("diabetes");
+  }
+  if (patient?.diagnosis?.hypertension) {
+    diagnoses.push("hypertension");
+  }
+
+  if (diagnoses.length === 0) {
+    return "No supported diagnosis was provided.";
+  }
+
+  return `Supported diagnosis context for this patient: ${diagnoses.join(" and ")}.`;
+};
+
 const buildPlainSystemPrompt = (
   language: string,
   refusalText: string,
@@ -99,9 +176,7 @@ const buildPlainSystemPrompt = (
   return `
 You are Max, a healthcare assistant chatbot.
 
-Use ONLY the health information below when answering:
-
-
+Use only the provided health education context and known patient context when answering.
 
 ${
   normalizedHealthContext
@@ -114,10 +189,19 @@ Rules:
 - You MAY restate known diagnoses from the provided patient context.
 - Do NOT prescribe medication.
 - Do NOT provide emergency medical advice.
-- Provide general health education  related to hypertension or diabetes only.
+- Provide general health education related only to the supported diagnoses explicitly present in the patient context.
+- If the patient has a known diagnosis of diabetes or hypertension, you may answer diet and food questions with safe, non-prescriptive guidance.
+- Keep the tone warm, natural, and conversational. Avoid sounding robotic or overly scripted.
+- Do not invent patient details, lab results, medications, or restrictions that were not provided.
+- Do not greet the patient by name unless the name is explicitly present in the provided patient context.
+- If no health education context was provided, do not mention or imply a guide, handout, document, or source text.
+- Answer the user's question directly first. Keep the reply concise and practical.
+- Do not provide advice for hypertension unless hypertension is explicitly present in the patient context.
+- Do not provide advice for diabetes unless diabetes is explicitly present in the patient context.
 - Always respond in ${language}.
 
 ${formatPatientContext(patient)}
+${getDiagnosisScope(patient)}
 
 If the question is outside the provided health information, reply with:
 "${refusalText}"
@@ -137,6 +221,64 @@ const getUpstreamStatus = (error: unknown): number | null => {
     return typeof status === "number" ? status : null;
   }
   return null;
+};
+
+const stripInventedGreeting = (
+  reply: string,
+  patient?: PatientContext,
+): string => {
+  if (patient?.name) {
+    return reply;
+  }
+
+  return reply.replace(/^(hi|hello|hey)\s+[A-Z][a-z]+[!,.]?\s*/i, "");
+};
+
+const stripUnsupportedSourceClaims = (
+  reply: string,
+  healthContext?: string,
+): string => {
+  if (healthContext?.trim()) {
+    return reply;
+  }
+
+  return reply
+    .replace(
+      /\b(according to|based on)\s+(the\s+)?(health\s+guide|guide|handout|document|information provided)[,:\s-]*/gi,
+      "",
+    )
+    .replace(/\s{2,}/g, " ")
+    .trim();
+};
+
+const stripUnsupportedConditionMentions = (
+  reply: string,
+  patient?: PatientContext,
+): string => {
+  const hasDiabetes = Boolean(patient?.diagnosis?.diabetes);
+  const hasHypertension = Boolean(patient?.diagnosis?.hypertension);
+
+  if (hasDiabetes && !hasHypertension) {
+    return reply
+      .replace(
+        /\b(high blood pressure|blood pressure|hypertension|hypertensive)\b/gi,
+        "your condition",
+      )
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  if (hasHypertension && !hasDiabetes) {
+    return reply
+      .replace(
+        /\b(diabetes|diabetic|blood sugar|glucose|insulin|hypoglycemia|hyperglycemia)\b/gi,
+        "your condition",
+      )
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+
+  return reply;
 };
 
 const createCompletion = async (
@@ -174,7 +316,11 @@ export const generateChatReply = async (
   healthContext?: string,
 ): Promise<{ reply: ChatContent; chatbot_active: boolean; usage: unknown }> => {
   const cleanMessage = message.trim();
-  const isHealthRelated = isHealthRelatedMessage(cleanMessage);
+  const hasDiagnosisContext = hasSupportedDiagnosis(patientContext);
+  const isFoodRelated = isFoodRelatedMessage(cleanMessage);
+  const isHealthRelated =
+    isHealthRelatedMessage(cleanMessage) ||
+    (isFoodRelated && hasDiagnosisContext);
   const refusalText = getRefusalText(language || "English");
   const safeHistory = normalizeHistory(history || []);
   const mappedHistory = safeHistory.map((item) => ({
@@ -187,7 +333,16 @@ export const generateChatReply = async (
       role: "user" as const,
       parts: [{ text: cleanMessage }],
     },
-  ]; // 4. Use const for contents
+  ];
+
+  // Debug logging for fallback logic
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[AIService] patientContext:", JSON.stringify(patientContext));
+    console.log("[AIService] healthContext:", healthContext);
+    console.log("[AIService] isFoodRelated:", isFoodRelated);
+    console.log("[AIService] hasDiagnosisContext:", hasDiagnosisContext);
+    console.log("[AIService] isHealthRelated:", isHealthRelated);
+  }
 
   let completion = null as Awaited<ReturnType<typeof createCompletion>> | null;
   let lastError: unknown;
@@ -216,7 +371,16 @@ export const generateChatReply = async (
     throw lastError ?? new Error("Failed to generate completion");
   }
 
-  const reply = completion.text?.trim();
+  const rawReply = completion.text?.trim();
+  const reply = rawReply
+    ? stripUnsupportedConditionMentions(
+        stripUnsupportedSourceClaims(
+          stripInventedGreeting(rawReply, patientContext),
+          healthContext,
+        ),
+        patientContext,
+      )
+    : rawReply;
   const isRefusal = reply === refusalText;
   const finalReply = !isHealthRelated && !isRefusal ? refusalText : reply;
   return {
