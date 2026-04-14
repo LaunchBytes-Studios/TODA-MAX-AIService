@@ -17,11 +17,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google/genai": "^1.49.0",
     "axios": "^1.13.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "openai": "^6.33.0",
     "zod": "^4.3.5"
   },
   "devDependencies": {

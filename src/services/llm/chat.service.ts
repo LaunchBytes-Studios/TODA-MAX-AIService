@@ -1,7 +1,7 @@
-import { openai } from "../../utils/lib/openai";
+import { gemini } from "../../utils/lib/gemini";
 
 type ChatRole = "patient" | "chatbot";
-type OpenAiRole = "user" | "assistant";
+type GeminiAiRole = "user" | "model";
 type ChatContent = string;
 
 type ChatHistoryItem = {
@@ -13,30 +13,13 @@ type PatientContext = {
   name?: string;
   age?: number;
   sex?: string;
-  diagnosis?: JSON | null;
+  diagnosis?: Record<string, boolean> | null;
 };
 
-const roleMapping: Record<ChatRole, OpenAiRole> = {
+const roleMapping: Record<ChatRole, GeminiAiRole> = {
   patient: "user",
-  chatbot: "assistant",
+  chatbot: "model",
 };
-
-const modules = `
-Hypertension is a condition where blood pressure is consistently too high.
-It may increase the risk of heart disease and stroke.
-
-Common lifestyle guidance for hypertension includes reducing sodium, limiting alcohol,
-maintaining a healthy weight, and regular physical activity. Common medication classes
-prescribed by clinicians include ACE inhibitors, ARBs, calcium channel blockers,
-and thiazide diuretics. Patients should follow a clinician's guidance for any medication.
-
-Diabetes is a chronic condition where blood sugar levels are elevated.
-It can be managed through proper diet, exercise, and medication under medical supervision.
-
-General nutrition guidance for diabetes includes focusing on non-starchy vegetables,
-lean proteins, whole grains in appropriate portions, legumes, nuts, and unsweetened beverages,
-while limiting sugary drinks, refined carbs, and highly processed snacks. Meal plans should be
-individualized by a clinician or dietitian.`;
 
 const formatPatientContext = (patient?: PatientContext): string => {
   if (!patient) {
@@ -64,33 +47,82 @@ const formatPatientContext = (patient?: PatientContext): string => {
   return `Patient context (use for personalization only; do not assume new facts):\n${lines.join("\n")}`;
 };
 
-const buildSystemPrompt = (language: string, patient?: PatientContext) => `
+const DEFAULT_REFUSAL_TEXT =
+  "Sorry, I cannot answer that question. Please wait for the eNavigator to assist you.";
+
+const getRefusalText = (language: string) => {
+  const normalized = language.trim().toLowerCase();
+  if (normalized === "hiligaynon" || normalized === "ilonggo") {
+    return "Pasensya, indi ko masabat imo pamangkot. Palihog hulat sa eNavigator para mabuligan yaka..";
+  }
+  if (normalized === "filipino" || normalized === "tagalog") {
+    return "Paumanhin, hindi ko masasagot ang tanong mo. Mangyaring maghintay sa eNavigator para sa tulong.";
+  }
+  if (normalized === "bisaya") {
+    return "Pasensya, dili ko makatubag sa imong pangutana. Palihug hulat sa eNavigator para sa tabang.";
+  }
+  return DEFAULT_REFUSAL_TEXT;
+};
+
+const modelsToTry = [
+  "gemini-3-flash-preview",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+];
+
+const healthKeywordPatterns = [
+  "diabetes",
+  "hypertension",
+  "high blood pressure",
+  "blood pressure",
+  "bp",
+  "blood sugar",
+  "glucose",
+  "insulin",
+  "hypoglycemia",
+  "hyperglycemia",
+  "hypertensive",
+];
+
+const isHealthRelatedMessage = (message: string): boolean => {
+  const normalized = message.toLowerCase();
+  return healthKeywordPatterns.some((keyword) => normalized.includes(keyword));
+};
+
+const buildPlainSystemPrompt = (
+  language: string,
+  refusalText: string,
+  patient?: PatientContext,
+  healthContext?: string,
+) => {
+  const normalizedHealthContext = healthContext?.trim();
+  return `
 You are Max, a healthcare assistant chatbot.
 
 Use ONLY the health information below when answering:
 
-${modules}
+
+
+${
+  normalizedHealthContext
+    ? `Additional health education context:\n${normalizedHealthContext}`
+    : ""
+}
 
 Rules:
 - Do NOT diagnose new medical conditions.
 - You MAY restate known diagnoses from the provided patient context.
 - Do NOT prescribe medication.
 - Do NOT provide emergency medical advice.
-- Provide general health education only.
-- If the question is outside the provided health information, set out_of_scope=true.
-- If you are unsure, set out_of_scope=true.
+- Provide general health education  related to hypertension or diabetes only.
 - Always respond in ${language}.
 
 ${formatPatientContext(patient)}
 
-Set chatbot_active=false when the question is outside the provided health information. Otherwise chatbot_active=true.
-if the chatbot_active=false, the reply should be "Sorry, I cannot answer that question. Please wait for the eNavigator  to assist you."
-Return ONLY valid JSON in this format:
-{
-  "reply": string,
-  "chatbot_active": boolean
-}
+If the question is outside the provided health information, reply with:
+"${refusalText}"
 `;
+};
 
 const normalizeHistory = (history: ChatHistoryItem[]): ChatHistoryItem[] => {
   return history
@@ -99,59 +131,97 @@ const normalizeHistory = (history: ChatHistoryItem[]): ChatHistoryItem[] => {
     .slice(-6);
 };
 
+const getUpstreamStatus = (error: unknown): number | null => {
+  if (typeof error === "object" && error !== null && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    return typeof status === "number" ? status : null;
+  }
+  return null;
+};
+
+const createCompletion = async (
+  model: string,
+  params: {
+    contents: Array<{ role: GeminiAiRole; parts: Array<{ text: string }> }>;
+    language: string;
+    refusalText: string;
+    patientContext?: PatientContext;
+    healthContext?: string;
+  },
+) => {
+  return gemini.models.generateContent({
+    model,
+    contents: params.contents,
+    config: {
+      systemInstruction: buildPlainSystemPrompt(
+        params.language || "English",
+        params.refusalText,
+        params.patientContext,
+        params.healthContext,
+      ),
+      maxOutputTokens: 1500,
+      temperature: 0.2,
+      responseMimeType: "text/plain",
+    },
+  });
+};
+
 export const generateChatReply = async (
   message: ChatContent,
   language?: string,
   history?: ChatHistoryItem[],
   patientContext?: PatientContext,
+  healthContext?: string,
 ): Promise<{ reply: ChatContent; chatbot_active: boolean; usage: unknown }> => {
   const cleanMessage = message.trim();
+  const isHealthRelated = isHealthRelatedMessage(cleanMessage);
+  const refusalText = getRefusalText(language || "English");
   const safeHistory = normalizeHistory(history || []);
   const mappedHistory = safeHistory.map((item) => ({
     role: roleMapping[item.role],
-    content: item.content,
+    parts: [{ text: item.content }],
   }));
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    max_tokens: 200,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: buildSystemPrompt(language || "English", patientContext),
-      },
-      ...mappedHistory,
-      {
-        role: "user",
-        content: cleanMessage,
-      },
-    ],
-  });
+  const contents = [
+    ...mappedHistory,
+    {
+      role: "user" as const,
+      parts: [{ text: cleanMessage }],
+    },
+  ]; // 4. Use const for contents
 
-  const rawContent = completion.choices[0]?.message?.content?.trim();
-  const fallback = {
-    reply: rawContent || "Sorry, I couldn't generate a response.",
-    chatbot_active: true,
-  };
+  let completion = null as Awaited<ReturnType<typeof createCompletion>> | null;
+  let lastError: unknown;
 
-  let parsed = fallback;
-  if (rawContent) {
+  for (const model of modelsToTry) {
     try {
-      const asJson = JSON.parse(rawContent) as {
-        reply?: string;
-        chatbot_active?: boolean;
-      };
-      parsed = {
-        reply: typeof asJson.reply === "string" ? asJson.reply : fallback.reply,
-        chatbot_active:
-          typeof asJson.chatbot_active === "boolean"
-            ? asJson.chatbot_active
-            : fallback.chatbot_active,
-      };
-    } catch {
-      parsed = fallback;
+      completion = await createCompletion(model, {
+        contents,
+        language: language || "English",
+        refusalText,
+        patientContext,
+        healthContext,
+      });
+      break;
+    } catch (error) {
+      lastError = error;
+      const status = getUpstreamStatus(error);
+      if (status === 404 || status === 429 || status === 503) {
+        continue;
+      }
+      throw error;
     }
   }
 
-  return { ...parsed, usage: completion.usage };
+  if (!completion) {
+    throw lastError ?? new Error("Failed to generate completion");
+  }
+
+  const reply = completion.text?.trim();
+  const isRefusal = reply === refusalText;
+  const finalReply = !isHealthRelated && !isRefusal ? refusalText : reply;
+  return {
+    reply: finalReply || "Sorry, I couldn't generate a response.",
+    chatbot_active: !isRefusal && isHealthRelated,
+    usage: completion.usageMetadata,
+  };
 };
