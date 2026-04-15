@@ -1,62 +1,11 @@
-// detect if message is about food/diet
-const foodKeywords = [
-  "food",
-  "diet",
-  "eat",
-  "eating",
-  "kaon",
-  "pagkaon",
-  "pagkain",
-  "meal",
-  "meals",
-  "nutrition",
-  "nutritional",
-  "carbohydrate",
-  "carbohydrates",
-  "sugar",
-  "sweet",
-  "sweetened",
-  "rice",
-  "bread",
-  "fruit",
-  "fruits",
-  "vegetable",
-  "vegetables",
-  "protein",
-  "fat",
-  "fats",
-  "snack",
-  "snacks",
-  "drink",
-  "drinks",
-  "beverage",
-  "beverages",
-  "menu",
-  "dish",
-  "dishes",
-  "cuisine",
-  "calorie",
-  "calories",
-  "fiber",
-  "glycemic",
-  "index",
-  "portion",
-  "serving",
-  "servings",
-  "kadamuan",
-  "kadamuon",
-  "consume",
-  "consumption",
-  "restriction",
-  "restricted",
-  "forbidden",
-];
-const isFoodRelatedMessage = (message: string): boolean => {
-  const normalized = message.toLowerCase();
-  return foodKeywords.some((keyword) => normalized.includes(keyword));
-};
 import { gemini } from "../../utils/lib/gemini";
-
+import {
+  diabetesKeywordPatterns,
+  foodKeywords,
+  healthKeywordPatterns,
+  hypertensionKeywordPatterns,
+  mentionsKeyword,
+} from "../../utils/lib/chat-keywords";
 type ChatRole = "patient" | "chatbot";
 type GeminiAiRole = "user" | "model";
 type ChatContent = string;
@@ -121,29 +70,69 @@ const getRefusalText = (language: string) => {
   return DEFAULT_REFUSAL_TEXT;
 };
 
-const modelsToTry = [
-  "gemini-3-flash-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-];
+const getUnsupportedDiagnosisText = (language: string) => {
+  const normalized = language.trim().toLowerCase();
+  if (normalized === "hiligaynon" || normalized === "ilonggo") {
+    return "Pasensya, indi ko masabat ina kay wala ini sa diagnosis nga ginhatag para sa imo. Palihog hulat sa eNavigator para mabuligan ka.";
+  }
+  if (normalized === "filipino" || normalized === "tagalog") {
+    return "Paumanhin, hindi ko masasagot iyan dahil wala ito sa diagnosis na ibinigay para sa iyo. Mangyaring maghintay sa eNavigator para sa tulong.";
+  }
+  if (normalized === "bisaya") {
+    return "Pasensya, dili ko makatubag ana kay wala kini sa diagnosis nga gihatag para nimo. Palihug hulat sa eNavigator para sa tabang.";
+  }
+  return "Sorry, I cannot answer that because it is outside the diagnosis provided for you. Please wait for the eNavigator to assist you.";
+};
 
-const healthKeywordPatterns = [
-  "diabetes",
-  "hypertension",
-  "high blood pressure",
-  "blood pressure",
-  "bp",
-  "blood sugar",
-  "glucose",
-  "insulin",
-  "hypoglycemia",
-  "hyperglycemia",
-  "hypertensive",
+const getBusyText = (language: string) => {
+  const normalized = language.trim().toLowerCase();
+  if (normalized === "hiligaynon" || normalized === "ilonggo") {
+    return "Pasensya, madamo subong ang nagagamit sang AI assistant. Palihog liwat anay sa makadiyot.";
+  }
+  if (normalized === "filipino" || normalized === "tagalog") {
+    return "Paumanhin, maraming gumagamit ng AI assistant ngayon. Pakisubukang muli maya-maya.";
+  }
+  if (normalized === "bisaya") {
+    return "Pasensya, daghan nagagamit sa AI assistant karon. Palihug sulayi balik unya.";
+  }
+  return "Sorry, the AI assistant is busy right now. Please try again shortly.";
+};
+
+const modelsToTry = [
+  "gemini-3.1-flash-lite-preview",
+  "gemini-2.5-flash",
+  "gemini-3-flash-preview",
 ];
 
 const isHealthRelatedMessage = (message: string): boolean => {
-  const normalized = message.toLowerCase();
-  return healthKeywordPatterns.some((keyword) => normalized.includes(keyword));
+  return mentionsKeyword(message, healthKeywordPatterns);
+};
+
+const isFoodRelatedMessage = (message: string): boolean => {
+  return mentionsKeyword(message, foodKeywords);
+};
+
+const asksAboutUnsupportedDiagnosis = (
+  message: string,
+  patient?: PatientContext,
+): boolean => {
+  const mentionsDiabetes = mentionsKeyword(message, diabetesKeywordPatterns);
+  const mentionsHypertension = mentionsKeyword(
+    message,
+    hypertensionKeywordPatterns,
+  );
+  const hasDiabetes = Boolean(patient?.diagnosis?.diabetes);
+  const hasHypertension = Boolean(patient?.diagnosis?.hypertension);
+
+  if (mentionsHypertension && !hasHypertension) {
+    return true;
+  }
+
+  if (mentionsDiabetes && !hasDiabetes) {
+    return true;
+  }
+
+  return false;
 };
 
 const buildConversationContext = (
@@ -237,6 +226,10 @@ const getUpstreamStatus = (error: unknown): number | null => {
     return typeof status === "number" ? status : null;
   }
   return null;
+};
+
+const isRetryableUpstreamStatus = (status: number | null): boolean => {
+  return status === 404 || status === 503;
 };
 
 const stripInventedGreeting = (
@@ -342,7 +335,15 @@ export const generateChatReply = async (
   const isHealthRelated =
     isHealthRelatedMessage(conversationContext) ||
     (isFoodRelated && hasDiagnosisContext);
+  const asksUnsupportedDiagnosis = asksAboutUnsupportedDiagnosis(
+    cleanMessage,
+    patientContext,
+  );
   const refusalText = getRefusalText(language || "English");
+  const unsupportedDiagnosisText = getUnsupportedDiagnosisText(
+    language || "English",
+  );
+  const busyText = getBusyText(language || "English");
   const mappedHistory = safeHistory.map((item) => ({
     role: roleMapping[item.role],
     parts: [{ text: item.content }],
@@ -362,7 +363,19 @@ export const generateChatReply = async (
     console.log("[AIService] isFoodRelated:", isFoodRelated);
     console.log("[AIService] hasDiagnosisContext:", hasDiagnosisContext);
     console.log("[AIService] isHealthRelated:", isHealthRelated);
+    console.log(
+      "[AIService] asksUnsupportedDiagnosis:",
+      asksUnsupportedDiagnosis,
+    );
     console.log("[AIService] conversationContext:", conversationContext);
+  }
+
+  if (asksUnsupportedDiagnosis) {
+    return {
+      reply: unsupportedDiagnosisText,
+      chatbot_active: false,
+      usage: null,
+    };
   }
 
   let completion = null as Awaited<ReturnType<typeof createCompletion>> | null;
@@ -370,6 +383,9 @@ export const generateChatReply = async (
 
   for (const model of modelsToTry) {
     try {
+      if (process.env.NODE_ENV !== "production") {
+        console.log("[AIService] attemptingModel:", model);
+      }
       completion = await createCompletion(model, {
         contents,
         language: language || "English",
@@ -381,7 +397,18 @@ export const generateChatReply = async (
     } catch (error) {
       lastError = error;
       const status = getUpstreamStatus(error);
-      if (status === 404 || status === 429 || status === 503) {
+      if (process.env.NODE_ENV !== "production") {
+        console.log(
+          "[AIService] modelAttemptFailed:",
+          model,
+          "status:",
+          status,
+        );
+      }
+      if (status === 429) {
+        break;
+      }
+      if (isRetryableUpstreamStatus(status)) {
         continue;
       }
       throw error;
@@ -389,6 +416,14 @@ export const generateChatReply = async (
   }
 
   if (!completion) {
+    const finalStatus = getUpstreamStatus(lastError);
+    if (finalStatus === 429 || finalStatus === 503) {
+      return {
+        reply: busyText,
+        chatbot_active: false,
+        usage: null,
+      };
+    }
     throw lastError ?? new Error("Failed to generate completion");
   }
 
