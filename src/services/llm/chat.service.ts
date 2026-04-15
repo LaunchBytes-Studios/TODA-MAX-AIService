@@ -4,6 +4,9 @@ const foodKeywords = [
   "diet",
   "eat",
   "eating",
+  "kaon",
+  "pagkaon",
+  "pagkain",
   "meal",
   "meals",
   "nutrition",
@@ -40,6 +43,8 @@ const foodKeywords = [
   "portion",
   "serving",
   "servings",
+  "kadamuan",
+  "kadamuon",
   "consume",
   "consumption",
   "restriction",
@@ -139,6 +144,17 @@ const healthKeywordPatterns = [
 const isHealthRelatedMessage = (message: string): boolean => {
   const normalized = message.toLowerCase();
   return healthKeywordPatterns.some((keyword) => normalized.includes(keyword));
+};
+
+const buildConversationContext = (
+  message: string,
+  history: ChatHistoryItem[],
+): string => {
+  const recentHistory = normalizeHistory(history)
+    .map((item) => item.content)
+    .join(" ");
+
+  return `${recentHistory} ${message}`.trim();
 };
 
 const hasSupportedDiagnosis = (patient?: PatientContext): boolean => {
@@ -316,13 +332,17 @@ export const generateChatReply = async (
   healthContext?: string,
 ): Promise<{ reply: ChatContent; chatbot_active: boolean; usage: unknown }> => {
   const cleanMessage = message.trim();
+  const safeHistory = normalizeHistory(history || []);
+  const conversationContext = buildConversationContext(
+    cleanMessage,
+    safeHistory,
+  );
   const hasDiagnosisContext = hasSupportedDiagnosis(patientContext);
-  const isFoodRelated = isFoodRelatedMessage(cleanMessage);
+  const isFoodRelated = isFoodRelatedMessage(conversationContext);
   const isHealthRelated =
-    isHealthRelatedMessage(cleanMessage) ||
+    isHealthRelatedMessage(conversationContext) ||
     (isFoodRelated && hasDiagnosisContext);
   const refusalText = getRefusalText(language || "English");
-  const safeHistory = normalizeHistory(history || []);
   const mappedHistory = safeHistory.map((item) => ({
     role: roleMapping[item.role],
     parts: [{ text: item.content }],
@@ -342,6 +362,7 @@ export const generateChatReply = async (
     console.log("[AIService] isFoodRelated:", isFoodRelated);
     console.log("[AIService] hasDiagnosisContext:", hasDiagnosisContext);
     console.log("[AIService] isHealthRelated:", isHealthRelated);
+    console.log("[AIService] conversationContext:", conversationContext);
   }
 
   let completion = null as Awaited<ReturnType<typeof createCompletion>> | null;
