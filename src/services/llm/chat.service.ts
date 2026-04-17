@@ -1,3 +1,4 @@
+import { isMedicationOrDosageQuestion } from "../../utils/keyword-utils";
 import { gemini } from "../../utils/lib/gemini";
 import {
   diabetesKeywordPatterns,
@@ -6,6 +7,18 @@ import {
   hypertensionKeywordPatterns,
   mentionsKeyword,
 } from "../../utils/lib/chat-keywords";
+import {
+  normalizeLanguage,
+  detectMessageLanguage,
+  getLocalizedText,
+} from "../../utils/language-utils";
+import { isNormalValueQuestion } from "../../utils/keyword-utils";
+import {
+  stripInventedGreeting,
+  stripUnsupportedSourceClaims,
+  stripUnsupportedConditionMentions,
+} from "../../utils/post-processing";
+import { SupportedLanguage } from "../../types/language";
 type ChatRole = "patient" | "chatbot";
 type GeminiAiRole = "user" | "model";
 type ChatContent = string;
@@ -15,7 +28,7 @@ type ChatHistoryItem = {
   content: ChatContent;
 };
 
-type PatientContext = {
+export type PatientContext = {
   name?: string;
   age?: number;
   sex?: string;
@@ -26,7 +39,32 @@ const roleMapping: Record<ChatRole, GeminiAiRole> = {
   patient: "user",
   chatbot: "model",
 };
-
+async function createCompletion(
+  model: string,
+  params: {
+    contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }>;
+    language: string;
+    refusalText: string;
+    patientContext?: PatientContext;
+    healthContext?: string;
+  },
+) {
+  return gemini.models.generateContent({
+    model,
+    contents: params.contents,
+    config: {
+      systemInstruction: buildPlainSystemPrompt(
+        params.language || "english",
+        params.refusalText,
+        params.patientContext,
+        params.healthContext,
+      ),
+      maxOutputTokens: 1500,
+      temperature: 0.2,
+      responseMimeType: "text/plain",
+    },
+  });
+}
 const formatPatientContext = (patient?: PatientContext): string => {
   if (!patient) {
     return "";
@@ -51,51 +89,6 @@ const formatPatientContext = (patient?: PatientContext): string => {
   }
 
   return `Patient context (use for personalization only; do not assume new facts):\n${lines.join("\n")}`;
-};
-
-const DEFAULT_REFUSAL_TEXT =
-  "Sorry, I cannot answer that question. Please wait for the eNavigator to assist you.";
-
-const getRefusalText = (language: string) => {
-  const normalized = language.trim().toLowerCase();
-  if (normalized === "hiligaynon" || normalized === "ilonggo") {
-    return "Pasensya, indi ko masabat imo pamangkot. Palihog hulat sa eNavigator para mabuligan ka.";
-  }
-  if (normalized === "filipino" || normalized === "tagalog") {
-    return "Paumanhin, hindi ko masasagot ang tanong mo. Mangyaring maghintay sa eNavigator para sa tulong.";
-  }
-  if (normalized === "bisaya") {
-    return "Pasensya, dili ko makatubag sa imong pangutana. Palihug hulat sa eNavigator para sa tabang.";
-  }
-  return DEFAULT_REFUSAL_TEXT;
-};
-
-const getUnsupportedDiagnosisText = (language: string) => {
-  const normalized = language.trim().toLowerCase();
-  if (normalized === "hiligaynon" || normalized === "ilonggo") {
-    return "Pasensya, indi ko masabat ina kay wala ini sa diagnosis nga ginhatag para sa imo. Palihog hulat sa eNavigator para mabuligan ka.";
-  }
-  if (normalized === "filipino" || normalized === "tagalog") {
-    return "Paumanhin, hindi ko masasagot iyan dahil wala ito sa diagnosis na ibinigay para sa iyo. Mangyaring maghintay sa eNavigator para sa tulong.";
-  }
-  if (normalized === "bisaya") {
-    return "Pasensya, dili ko makatubag ana kay wala kini sa diagnosis nga gihatag para nimo. Palihug hulat sa eNavigator para sa tabang.";
-  }
-  return "Sorry, I cannot answer that because it is outside the diagnosis provided for you. Please wait for the eNavigator to assist you.";
-};
-
-const getBusyText = (language: string) => {
-  const normalized = language.trim().toLowerCase();
-  if (normalized === "hiligaynon" || normalized === "ilonggo") {
-    return "Pasensya, madamo subong ang nagagamit sang AI assistant. Palihog liwat anay sa makadiyot.";
-  }
-  if (normalized === "filipino" || normalized === "tagalog") {
-    return "Paumanhin, maraming gumagamit ng AI assistant ngayon. Pakisubukang muli maya-maya.";
-  }
-  if (normalized === "bisaya") {
-    return "Pasensya, daghan nagagamit sa AI assistant karon. Palihug sulayi balik unya.";
-  }
-  return "Sorry, the AI assistant is busy right now. Please try again shortly.";
 };
 
 const modelsToTry = [
@@ -203,6 +196,7 @@ Rules:
 - Answer the user's question directly first. Keep the reply concise and practical.
 - Do not provide advice for hypertension unless hypertension is explicitly present in the patient context.
 - Do not provide advice for diabetes unless diabetes is explicitly present in the patient context.
+- If the patient's latest message is clearly in Hiligaynon/Ilonggo, respond in Hiligaynon even if an older stored language value is different.
 - Always respond in ${language}.
 
 ${formatPatientContext(patient)}
@@ -232,118 +226,47 @@ const isRetryableUpstreamStatus = (status: number | null): boolean => {
   return status === 404 || status === 503;
 };
 
-const stripInventedGreeting = (
-  reply: string,
-  patient?: PatientContext,
-): string => {
-  if (patient?.name) {
-    return reply;
-  }
-
-  return reply.replace(/^(hi|hello|hey)\s+[A-Z][a-z]+[!,.]?\s*/i, "");
-};
-
-const stripUnsupportedSourceClaims = (
-  reply: string,
-  healthContext?: string,
-): string => {
-  if (healthContext?.trim()) {
-    return reply;
-  }
-
-  return reply
-    .replace(
-      /\b(according to|based on)\s+(the\s+)?(health\s+guide|guide|handout|document|information provided)[,:\s-]*/gi,
-      "",
-    )
-    .replace(/\s{2,}/g, " ")
-    .trim();
-};
-
-const stripUnsupportedConditionMentions = (
-  reply: string,
-  patient?: PatientContext,
-): string => {
-  const hasDiabetes = Boolean(patient?.diagnosis?.diabetes);
-  const hasHypertension = Boolean(patient?.diagnosis?.hypertension);
-
-  if (hasDiabetes && !hasHypertension) {
-    return reply
-      .replace(
-        /\b(high blood pressure|blood pressure|hypertension|hypertensive)\b/gi,
-        "your condition",
-      )
-      .replace(/\s{2,}/g, " ")
-      .trim();
-  }
-
-  if (hasHypertension && !hasDiabetes) {
-    return reply
-      .replace(
-        /\b(diabetes|diabetic|blood sugar|glucose|insulin|hypoglycemia|hyperglycemia)\b/gi,
-        "your condition",
-      )
-      .replace(/\s{2,}/g, " ")
-      .trim();
-  }
-
-  return reply;
-};
-
-const createCompletion = async (
-  model: string,
-  params: {
-    contents: Array<{ role: GeminiAiRole; parts: Array<{ text: string }> }>;
-    language: string;
-    refusalText: string;
-    patientContext?: PatientContext;
-    healthContext?: string;
-  },
-) => {
-  return gemini.models.generateContent({
-    model,
-    contents: params.contents,
-    config: {
-      systemInstruction: buildPlainSystemPrompt(
-        params.language || "English",
-        params.refusalText,
-        params.patientContext,
-        params.healthContext,
-      ),
-      maxOutputTokens: 1500,
-      temperature: 0.2,
-      responseMimeType: "text/plain",
-    },
-  });
-};
-
 export const generateChatReply = async (
   message: ChatContent,
   language?: string,
   history?: ChatHistoryItem[],
   patientContext?: PatientContext,
   healthContext?: string,
-): Promise<{ reply: ChatContent; chatbot_active: boolean; usage: unknown }> => {
+): Promise<{
+  reply: ChatContent;
+  chatbot_active: boolean;
+  usage: unknown;
+  detected_language: SupportedLanguage;
+}> => {
   const cleanMessage = message.trim();
   const safeHistory = normalizeHistory(history || []);
   const conversationContext = buildConversationContext(
     cleanMessage,
     safeHistory,
   );
+  const requestedLanguage = normalizeLanguage(language);
+  // Detect language from the latest message if not provided
+  const detectedLanguage = language
+    ? requestedLanguage
+    : detectMessageLanguage(cleanMessage, language);
+
   const hasDiagnosisContext = hasSupportedDiagnosis(patientContext);
   const isFoodRelated = isFoodRelatedMessage(conversationContext);
+  const isMedicationRelated = isMedicationOrDosageQuestion(cleanMessage);
   const isHealthRelated =
     isHealthRelatedMessage(conversationContext) ||
-    (isFoodRelated && hasDiagnosisContext);
+    (isFoodRelated && hasDiagnosisContext) ||
+    (isMedicationRelated && hasDiagnosisContext);
   const asksUnsupportedDiagnosis = asksAboutUnsupportedDiagnosis(
     cleanMessage,
     patientContext,
   );
-  const refusalText = getRefusalText(language || "English");
-  const unsupportedDiagnosisText = getUnsupportedDiagnosisText(
-    language || "English",
+  const refusalText = getLocalizedText("refusal", detectedLanguage);
+  const unsupportedDiagnosisText = getLocalizedText(
+    "unsupported",
+    detectedLanguage,
   );
-  const busyText = getBusyText(language || "English");
+  const busyText = getLocalizedText("busy", detectedLanguage);
   const mappedHistory = safeHistory.map((item) => ({
     role: roleMapping[item.role],
     parts: [{ text: item.content }],
@@ -367,13 +290,22 @@ export const generateChatReply = async (
       "[AIService] asksUnsupportedDiagnosis:",
       asksUnsupportedDiagnosis,
     );
+    console.log("[AIService] detectedLanguage:", detectedLanguage);
     console.log("[AIService] conversationContext:", conversationContext);
   }
-
-  if (asksUnsupportedDiagnosis) {
+  // Escalate/refuse if question is about normal/reference values
+  if (
+    asksUnsupportedDiagnosis ||
+    isNormalValueQuestion(cleanMessage) ||
+    isMedicationOrDosageQuestion(cleanMessage)
+  ) {
     return {
-      reply: unsupportedDiagnosisText,
+      reply:
+        unsupportedDiagnosisText ||
+        refusalText ||
+        "Sorry, I cannot answer that question.",
       chatbot_active: false,
+      detected_language: detectedLanguage,
       usage: null,
     };
   }
@@ -388,11 +320,14 @@ export const generateChatReply = async (
       }
       completion = await createCompletion(model, {
         contents,
-        language: language || "English",
+        language: detectedLanguage,
         refusalText,
         patientContext,
         healthContext,
       });
+      if (process.env.NODE_ENV !== "production") {
+        console.log("[AIService] completion.text:", completion.text);
+      }
       break;
     } catch (error) {
       lastError = error;
@@ -421,6 +356,7 @@ export const generateChatReply = async (
       return {
         reply: busyText,
         chatbot_active: false,
+        detected_language: detectedLanguage,
         usage: null,
       };
     }
@@ -439,9 +375,16 @@ export const generateChatReply = async (
     : rawReply;
   const isRefusal = reply === refusalText;
   const finalReply = !isHealthRelated && !isRefusal ? refusalText : reply;
+  // ADD THIS:
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[AIService] rawReply:", rawReply);
+    console.log("[AIService] reply:", reply);
+    console.log("[AIService] finalReply:", finalReply);
+  }
   return {
     reply: finalReply || "Sorry, I couldn't generate a response.",
     chatbot_active: !isRefusal && isHealthRelated,
+    detected_language: detectedLanguage,
     usage: completion.usageMetadata,
   };
 };

@@ -39,6 +39,7 @@ export const chat = async (req: Request, res: Response) => {
     return res.json({
       reply: result.reply,
       chatbot_active: result.chatbot_active,
+      detected_language: result.detected_language,
     });
   } catch (error) {
     console.error(error);
