@@ -59,7 +59,7 @@ async function createCompletion(
         params.patientContext,
         params.healthContext,
       ),
-      maxOutputTokens: 1500,
+      maxOutputTokens: 800,
       temperature: 0.2,
       responseMimeType: "text/plain",
     },
@@ -214,7 +214,7 @@ const normalizeHistory = (history: ChatHistoryItem[]): ChatHistoryItem[] => {
   return history
     .map((item) => ({ role: item.role, content: item.content.trim() }))
     .filter((item) => item.content)
-    .slice(-6);
+    .slice(-3);
 };
 
 const getUpstreamStatus = (error: unknown): number | null => {
