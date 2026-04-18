@@ -26,7 +26,7 @@ export const chat = async (req: Request, res: Response) => {
 
     const { message, language, history, patient_context, health_context } =
       parsed.data;
-
+    console.log("[AIService] Calling generateChatReply...");
     const result = await generateChatReply(
       message,
       language,
@@ -34,7 +34,7 @@ export const chat = async (req: Request, res: Response) => {
       patient_context,
       health_context,
     );
-
+    console.log("[AIService] generateChatReply finished:", result);
     console.log("Token usage:", result.usage);
     return res.json({
       reply: result.reply,

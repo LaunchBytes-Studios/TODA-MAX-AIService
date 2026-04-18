@@ -197,7 +197,8 @@ Rules:
 - Answer the user's question directly first. Keep the reply concise and practical.
 - Do not provide advice for hypertension unless hypertension is explicitly present in the patient context.
 - Do not provide advice for diabetes unless diabetes is explicitly present in the patient context.
-- If the patient's latest message is clearly in Hiligaynon/Ilonggo, respond in Hiligaynon even if an older stored language value is different.
+- If the user's latest message contains an explicit language instruction (e.g., "Please answer in English" or "Palihog sabta sa Hiligaynon"), always follow that instruction for the reply language, even if the previous conversation was in another language.
+- Always reply in the same language as the user's latest message, unless the user gives an explicit language instruction (e.g., "Please answer in English" or "Palihog sabta sa Hiligaynon"). If an explicit instruction is present, follow that instruction.
 - If the patient asks for the meaning of a medical term related to their diagnosis, provide a simple definition.
 - Always respond in ${language}.
 
@@ -227,6 +228,22 @@ const getUpstreamStatus = (error: unknown): number | null => {
 const isRetryableUpstreamStatus = (status: number | null): boolean => {
   return status === 404 || status === 503;
 };
+
+// Helper to add a timeout to a promise
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("LLM timeout")), ms);
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
 
 export const generateChatReply = async (
   message: ChatContent,
@@ -320,13 +337,17 @@ export const generateChatReply = async (
       if (process.env.NODE_ENV !== "production") {
         console.log("[AIService] attemptingModel:", model);
       }
-      completion = await createCompletion(model, {
-        contents,
-        language: detectedLanguage,
-        refusalText,
-        patientContext,
-        healthContext,
-      });
+      // Add a 50s timeout to the LLM call
+      completion = await withTimeout(
+        createCompletion(model, {
+          contents,
+          language: detectedLanguage,
+          refusalText,
+          patientContext,
+          healthContext,
+        }),
+        50000, // 50 seconds
+      );
       if (process.env.NODE_ENV !== "production") {
         console.log("[AIService] completion.text:", completion.text);
       }
@@ -341,6 +362,15 @@ export const generateChatReply = async (
           "status:",
           status,
         );
+      }
+      if (error instanceof Error && error.message === "LLM timeout") {
+        // If the LLM times out, return a busy message
+        return {
+          reply: busyText,
+          chatbot_active: false,
+          detected_language: detectedLanguage,
+          usage: null,
+        };
       }
       if (status === 429) {
         break;
