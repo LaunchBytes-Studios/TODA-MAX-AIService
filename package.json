@@ -7,6 +7,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "npx ts-node src/index.ts",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint \"src/**/*.{js,ts,mjs,cjs,cts,mts}\"",
     "lint:fix": "eslint \"src/**/*.{js,ts,mjs,cjs,cts,mts}\" --fix",
     "format": "prettier --write \"src/**/*.{js,ts,mjs,cjs,cts,mts}\"",
@@ -17,6 +18,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google/genai": "^1.49.0",
     "axios": "^1.13.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

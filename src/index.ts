@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import chatRoutes from "../src/routes/chat";
 
 // Create the Express app
 const app = express();
@@ -9,13 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 // root check endpoint - to verify the service is running
-app.get("/", (_req, res) => {
-  res.json({
-    status: "healthy",
-    service: "TODA MAX AI Service",
-    timestamp: new Date().toISOString(),
-  });
-});
+app.use("/chat", chatRoutes);
 
 // Start the server
 const PORT = process.env["PORT"] || 3001;
