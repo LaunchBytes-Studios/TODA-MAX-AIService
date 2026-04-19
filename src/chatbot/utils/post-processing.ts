@@ -1,5 +1,5 @@
-//helpers for chat replies
-import { PatientContext } from "../services/llm/chat.service";
+//chat reply helper
+import { PatientContext } from "../types/patient";
 
 export const stripInventedGreeting = (
   reply: string,

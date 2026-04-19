@@ -223,7 +223,7 @@ export const getLocalizedText = (type: LocalizedTextType, language: string) => {
     },
     busy: {
       hiligaynon:
-        "Pasensya, madamo subong ang nagagamit sang AI assistant. Palihog liwat anay sa makadiyot.",
+        "Pasensya, madamo subong ang nagagamit sang AI assistant. Palihog liwat anay sa makadali.",
       filipino:
         "Paumanhin, maraming gumagamit ng AI assistant ngayon. Pakisubukang muli maya-maya.",
       bisaya:

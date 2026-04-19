@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { z } from "zod";
-import { generateChatReply } from "../services/llm/chat.service";
+import { generateChatReply } from "../llm/chat.service";
 
 const chatSchema = z.object({
   message: z.string().trim().min(2).max(1000),
