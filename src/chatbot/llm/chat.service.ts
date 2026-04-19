@@ -20,7 +20,7 @@ import {
 } from "./diagnosis-utils";
 import { createCompletion } from "./gemini-provider";
 
-// --- Inlined from history-utils.ts ---
+// ---  history utility---
 const normalizeHistory = (
   history: { role: string; content: string }[],
 ): { role: string; content: string }[] => {
@@ -237,15 +237,6 @@ export const generateChatReply = async (
       }
       throw error;
     }
-  }
-  // SIMULATION: Force busy fallback for testing if a special flag is present in the message
-  if (cleanMessage.includes("__simulate_busy__")) {
-    return {
-      reply: busyText,
-      chatbot_active: false,
-      detected_language: effectiveLanguage,
-      usage: null,
-    };
   }
   if (!completion) {
     const finalStatus = getUpstreamStatus(lastError);
