@@ -1,0 +1,48 @@
+name: Express CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, development]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Run TypeScript type check
+        run: npm run typecheck
+
+      - name: Expo config check
+        run: npx expo config --type public
+
+      - name: Run Prettier (auto-fix)
+        run: npm run format
+
+      - name: Commit Prettier fixes
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: "chore: format code with prettier"
+          commit_user_name: github-actions
+          commit_user_email: github-actions@github.com
