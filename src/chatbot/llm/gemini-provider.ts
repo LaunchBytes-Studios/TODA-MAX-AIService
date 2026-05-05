@@ -49,7 +49,7 @@ export async function createCompletion(
     healthContext?: string;
   },
 ) {
-  return gemini.models.generateContent({
+  const res = await gemini.models.generateContent({
     model,
     contents: params.contents,
     config: {
@@ -64,6 +64,84 @@ export async function createCompletion(
       responseMimeType: "text/plain",
     },
   });
+
+  // Normalize the varying shapes of responses from the Gemini client into a
+  // stable object with `text` and `usageMetadata` so callers don't need to
+  // handle many edge cases. Use `unknown` and narrow types to avoid `any`.
+  const resObj = res as unknown as Record<string, unknown>;
+  let text: string | undefined = undefined;
+
+  // Newer SDKs sometimes expose `outputText` as a string
+  if (
+    typeof resObj["outputText"] === "string" &&
+    (resObj["outputText"] as string).trim()
+  ) {
+    text = (resObj["outputText"] as string).trim();
+  }
+
+  // Older / alternate shapes may include `candidates` with `content` parts
+  if (!text && Array.isArray(resObj["candidates"])) {
+    const candidates = resObj["candidates"] as unknown[];
+    if (candidates.length) {
+      const cand = candidates[0] as unknown;
+      if (typeof (cand as Record<string, unknown>)["outputText"] === "string") {
+        text = (
+          (cand as Record<string, unknown>)["outputText"] as string
+        ).trim();
+      } else if (Array.isArray((cand as Record<string, unknown>)["content"])) {
+        const parts = (cand as Record<string, unknown>)["content"] as unknown[];
+        text = parts
+          .map(
+            (p) =>
+              (typeof p === "object" && p !== null
+                ? ((p as Record<string, unknown>)["text"] as string)
+                : "") || "",
+          )
+          .join("")
+          .trim();
+      }
+    }
+  }
+
+  // Some responses use `output` with content arrays
+  if (!text && Array.isArray(resObj["output"])) {
+    const output = resObj["output"] as unknown[];
+    if (output.length) {
+      const first = output[0] as Record<string, unknown> | undefined;
+      if (first) {
+        if (Array.isArray(first["content"])) {
+          const parts = first["content"] as unknown[];
+          text = parts
+            .map(
+              (p) =>
+                (typeof p === "object" && p !== null
+                  ? ((p as Record<string, unknown>)["text"] as string)
+                  : "") || "",
+            )
+            .join("")
+            .trim();
+        }
+        if (!text && typeof first["text"] === "string") {
+          text = (first["text"] as string).trim();
+        }
+      }
+    }
+  }
+
+  // Fallback: try the top-level `text` property if present
+  if (!text && typeof resObj["text"] === "string") {
+    text = (resObj["text"] as string).trim();
+  }
+
+  // Extract usage metadata if present (don't expose full raw response)
+  const usageMetadata = resObj["usage"] ?? resObj["usageMetadata"] ?? null;
+
+  return {
+    // `text` may be undefined when the upstream response has no usable text
+    text: text ?? undefined,
+    // Expose usage/metadata when available for downstream logging
+    usageMetadata: usageMetadata as unknown,
+  };
 }
 
 function buildPlainSystemPrompt(
@@ -84,6 +162,7 @@ ${
     : ""
 }
 
+
 Rules:
 - Do NOT diagnose new medical conditions.
 - You MAY restate known diagnoses from the provided patient context.
@@ -92,22 +171,29 @@ Rules:
 - Provide general health education for diabetes or hypertension if the patient has those diagnoses.
 - You MAY define terms (like “hypoglycemia” or “high blood pressure”) if they are relevant to the patient’s diagnosis.
 - If the patient has a known diagnosis of diabetes or hypertension, you may answer diet and food questions with safe, non-prescriptive guidance.
+- You MAY answer physical activity and exercise questions with safe, non-prescriptive general guidance.
+- You MAY answer general health education questions about normal/reference values and definitions (for example: normal blood pressure or normal blood sugar), even if that condition is not listed in the patient's diagnosis. Keep these answers generic and non-prescriptive.
+- You MAY answer general health education questions about blood pressure, blood sugar, cholesterol, and other common health topics for all users, even if they do not have a matching diagnosis. Do NOT give personalized treatment or prescription advice.
 - Keep the tone warm, natural, and conversational. Avoid sounding robotic or overly scripted.
 - Do not invent patient details, lab results, medications, or restrictions that were not provided.
 - Do not greet the patient by name unless the name is explicitly present in the provided patient context.
 - If no health education context was provided, do not mention or imply a guide, handout, document, or source text.
 - Answer the user's question directly first. Keep the reply concise and practical.
-- Do not provide advice for hypertension unless hypertension is explicitly present in the patient context.
-- Do not provide advice for diabetes unless diabetes is explicitly present in the patient context.
+- Do not provide personalized treatment advice for hypertension unless hypertension is explicitly present in the patient context.
+- Do not provide personalized treatment advice for diabetes unless diabetes is explicitly present in the patient context.
 - If the user's latest message contains an explicit language instruction (e.g., "Please answer in English" or "Palihog sabta sa Hiligaynon"), always follow that instruction for the reply language, even if the previous conversation was in another language.
 - Always reply in the same language as the user's latest message, unless the user gives an explicit language instruction (e.g., "Please answer in English" or "Palihog sabta sa Hiligaynon"). If an explicit instruction is present, follow that instruction.
 - If the patient asks for the meaning of a medical term related to their diagnosis, provide a simple definition.
+- For normal/reference value questions, respond in 2-4 short sentences and include:
+  - a plain-language definition of the metric
+  - a typical adult reference range (if commonly known)
+  - a brief, non-prescriptive note that ranges can vary by lab or individual
 - Always respond in ${language}.
 
 ${formatPatientContext(patient)}
 ${getDiagnosisScope(patient)}
 
-If the question is not related to diabetes or hypertension (when those are the patient’s diagnoses), reply with:
+If the question is outside health education, or asks for diagnosis, prescription, or emergency medical instructions, reply with:
 "${refusalText}"
 `;
 }
