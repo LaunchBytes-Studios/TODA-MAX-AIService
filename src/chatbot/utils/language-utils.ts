@@ -175,6 +175,20 @@ export const detectMessageLanguage = (
   fallbackLanguage?: string,
 ): SupportedLanguage => {
   const normalizedMessage = message.trim().toLowerCase();
+  for (const [canonical, aliases] of Object.entries(languageAliases) as Array<
+    [SupportedLanguage, string[]]
+  >) {
+    if (
+      aliases.some((alias) =>
+        new RegExp(
+          `\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+          "i",
+        ).test(normalizedMessage),
+      )
+    ) {
+      return canonical;
+    }
+  }
   // Count Tagalog and Hiligaynon markers
   let tagalogCount = 0;
   let hiligaynonCount = 0;

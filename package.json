@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "dev": "npx ts-node src/index.ts",
     "typecheck": "tsc --noEmit",
+    "test": "vitest",
     "lint": "eslint \"src/**/*.{js,ts,mjs,cjs,cts,mts}\"",
     "lint:fix": "eslint \"src/**/*.{js,ts,mjs,cjs,cts,mts}\" --fix",
     "format": "prettier --write \"src/**/*.{js,ts,mjs,cjs,cts,mts}\"",
@@ -40,6 +41,7 @@
     "nodemon": "^3.1.11",
     "prettier": "^3.7.4",
     "ts-node": "^10.9.2",
+    "vitest": "^1.4.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.52.0"
   },

@@ -2,7 +2,10 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { generateChatReply } from "../llm/chat.service";
 
+// Request validation schema for the chat endpoint. Keeping this strict
+// helps the controller reject malformed requests before business logic.
 const chatSchema = z.object({
+  // Strict request shape — fail early on bad payloads.
   message: z.string().trim().min(2).max(1000),
   language: z.string().trim().max(100).optional(),
   history: z.array(z.any()).optional(),
@@ -19,6 +22,7 @@ const chatSchema = z.object({
 
 export const chat = async (req: Request, res: Response) => {
   try {
+    // Validate the request and pass the cleaned payload to the chat service.
     const parsed = chatSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: "Invalid request body" });
@@ -34,6 +38,7 @@ export const chat = async (req: Request, res: Response) => {
       patient_context,
       health_context,
     );
+    // log the result here while I am still debugging the chat flow.
     console.log("[AIService] generateChatReply finished:", result);
     console.log("Token usage:", result.usage);
     return res.json({
