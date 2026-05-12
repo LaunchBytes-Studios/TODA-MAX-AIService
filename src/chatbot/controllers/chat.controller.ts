@@ -2,13 +2,26 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { generateChatReply } from "../llm/chat.service";
 
+const RATE_LIMIT_MESSAGE =
+  "Gemini quota exceeded or rate limited. Please try again later.";
+const HIGH_DEMAND_MESSAGE =
+  "Gemini is experiencing high demand. Please try again later.";
+const GENERIC_ERROR_MESSAGE = "Something went wrong";
+
 // Request validation schema for the chat endpoint. Keeping this strict
 // helps the controller reject malformed requests before business logic.
 const chatSchema = z.object({
   // Strict request shape — fail early on bad payloads.
   message: z.string().trim().min(2).max(1000),
   language: z.string().trim().max(100).optional(),
-  history: z.array(z.any()).optional(),
+  history: z
+    .array(
+      z.object({
+        role: z.enum(["patient", "chatbot"]),
+        content: z.string().trim().max(4000),
+      }),
+    )
+    .optional(),
   health_context: z.string().trim().max(8000).optional(),
   patient_context: z
     .object({
@@ -18,7 +31,29 @@ const chatSchema = z.object({
       diagnosis: z.record(z.string(), z.boolean()).optional(),
     })
     .optional(),
+  // request_id is intentionally excluded — used for debug tracing only
+  // and read directly from the raw body without validation.
 });
+
+const getUpstreamStatus = (error: unknown): number =>
+  typeof error === "object" &&
+  error !== null &&
+  "status" in error &&
+  typeof error.status === "number"
+    ? error.status
+    : 500;
+
+const getControllerErrorMessage = (status: number): string => {
+  if (status === 429) {
+    return RATE_LIMIT_MESSAGE;
+  }
+
+  if (status === 503) {
+    return HIGH_DEMAND_MESSAGE;
+  }
+
+  return GENERIC_ERROR_MESSAGE;
+};
 
 export const chat = async (req: Request, res: Response) => {
   try {
@@ -48,20 +83,8 @@ export const chat = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error(error);
-    const upstreamStatus =
-      typeof error === "object" &&
-      error !== null &&
-      "status" in error &&
-      typeof error.status === "number"
-        ? error.status
-        : 500;
-
-    const message =
-      upstreamStatus === 429
-        ? "Gemini quota exceeded or rate limited. Please try again later."
-        : upstreamStatus === 503
-          ? "Gemini is experiencing high demand. Please try again later."
-          : "Something went wrong";
+    const upstreamStatus = getUpstreamStatus(error);
+    const message = getControllerErrorMessage(upstreamStatus);
 
     return res.status(upstreamStatus).json({ error: message });
   }

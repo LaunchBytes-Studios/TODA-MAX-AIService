@@ -1,13 +1,9 @@
-//this service coordinates detection of normal-value questions
 import {
   isMedicationOrDosageQuestion,
   isNormalValueQuestion,
 } from "../utils/keyword-utils";
 import { PatientContext } from "../types/patient";
-import {
-  detectMessageLanguage,
-  getLocalizedText,
-} from "../utils/language-utils";
+import { getLocalizedText } from "../utils/language-utils";
 import { findMetricByMessage } from "../utils/metrics";
 import {
   stripInventedGreeting,
@@ -26,13 +22,37 @@ import * as chatServiceHelpers from "./chat.service.helpers";
 import type { ChatHistoryItem } from "./chat.service.helpers";
 import { normalValueFallbackReplies } from "../utils/reply-texts";
 
+// Types
+
 type ChatContent = string;
 
-const modelsToTry = [
+interface ChatReply {
+  reply: ChatContent;
+  chatbot_active: boolean;
+  usage: unknown;
+  detected_language: SupportedLanguage;
+}
+
+interface MessageFlags {
+  isFoodRelated: boolean;
+  isMedicationRelated: boolean;
+  isHealthRelated: boolean;
+  asksUnsupportedDiagnosis: boolean;
+  asksNormalValueQuestion: boolean;
+  isGeneralEducation: boolean;
+}
+
+// Config
+
+const MODEL_TIMEOUT_MS = 50_000;
+
+const MODELS_TO_TRY = [
   "gemini-3.1-flash-lite-preview",
   "gemini-2.5-flash",
   "gemini-3-flash-preview",
-];
+] as const;
+
+// Normal-value reply builder
 
 export const buildNormalValueReply = (
   message: string,
@@ -40,8 +60,8 @@ export const buildNormalValueReply = (
 ): string => {
   const metric = findMetricByMessage(message);
   const lang = language ?? "english";
+
   if (!metric) {
-    // No specific metric matched, return the generic fallback.
     return (
       normalValueFallbackReplies[lang] ?? normalValueFallbackReplies.english
     );
@@ -54,47 +74,15 @@ export const buildNormalValueReply = (
   return `${def} ${range} ${note}`;
 };
 
-// Main entrypoint used by the Express controller. Keeps top-level flow
-// readable: detect special cases (normal-values, medication), then
-// fall back to the LLM with safe post-processing.
+// Message classifier
 
-export const generateChatReply = async (
-  message: ChatContent,
-  language?: string,
-  history?: ChatHistoryItem[],
-  patientContext?: PatientContext,
-  healthContext?: string,
-): Promise<{
-  reply: ChatContent;
-  chatbot_active: boolean;
-  usage: unknown;
-  detected_language: SupportedLanguage;
-}> => {
-  const cleanMessage = message.trim();
-  const safeHistory = chatServiceHelpers.normalizeHistory(history || []);
-  const conversationContext = chatServiceHelpers.buildConversationContext(
-    cleanMessage,
-    safeHistory,
-  );
-
-  let historyLanguage: SupportedLanguage | undefined = undefined;
-  for (let i = safeHistory.length - 1; i >= 0; i--) {
-    if (safeHistory[i].role === "patient" && safeHistory[i].content) {
-      historyLanguage = detectMessageLanguage(safeHistory[i].content, language);
-      break;
-    }
-  }
-
-  const effectiveLanguage = chatServiceHelpers.resolveEffectiveLanguage({
-    requestedLanguage: language,
-    historyLanguage,
-    message: cleanMessage,
-  });
-
-  const busyText = getLocalizedText("busy", effectiveLanguage);
-  const debugEnabled =
-    process.env.AI_DEBUG_LOGS === "true" ||
-    process.env.NODE_ENV !== "production";
+/**
+ * Computes all boolean flags needed to route a message.*/
+const classifyMessage = (
+  cleanMessage: string,
+  conversationContext: string,
+  patientContext: PatientContext | undefined,
+): MessageFlags => {
   const hasDiagnosisContext = hasSupportedDiagnosis(patientContext);
   const isFoodRelated = isFoodRelatedMessage(conversationContext);
   const isMedicationRelated = isMedicationOrDosageQuestion(cleanMessage);
@@ -108,81 +96,68 @@ export const generateChatReply = async (
   );
   const asksNormalValueQuestion = isNormalValueQuestion(cleanMessage);
   const isGeneralEducation = isHealthRelated || asksNormalValueQuestion;
-  const refusalText = getLocalizedText("refusal", effectiveLanguage);
-  const unsupportedDiagnosisText = getLocalizedText(
-    "unsupported",
-    effectiveLanguage,
-  );
-  const contents = chatServiceHelpers.buildCompletionContents(
-    safeHistory,
-    cleanMessage,
-  );
 
-  console.log("\n=== AI SERVICE DEBUG ===");
-  console.log("[AIService] cleanMessage:", cleanMessage);
-  console.log("[AIService] asksNormalValueQuestion:", asksNormalValueQuestion);
-  console.log(
-    "[AIService] asksUnsupportedDiagnosis:",
+  return {
+    isFoodRelated,
+    isMedicationRelated,
+    isHealthRelated,
     asksUnsupportedDiagnosis,
-  );
-  console.log("[AIService] isHealthRelated:", isHealthRelated);
-  console.log("[AIService] isGeneralEducation:", isGeneralEducation);
-  console.log("[AIService] patientContext:", JSON.stringify(patientContext));
-  console.log("======================\n");
+    asksNormalValueQuestion,
+    isGeneralEducation,
+  };
+};
 
-  if (!asksNormalValueQuestion && asksUnsupportedDiagnosis) {
-    return {
-      reply:
-        unsupportedDiagnosisText ||
-        refusalText ||
-        "Sorry, I cannot answer that question.",
-      chatbot_active: false,
-      detected_language: effectiveLanguage,
-      usage: null,
-    };
-  }
+// Model fallback loop
 
-  if (asksNormalValueQuestion) {
-    const metricsReply = buildNormalValueReply(cleanMessage, effectiveLanguage);
-    if (debugEnabled) {
-      console.log(
-        "[AIService] Using metrics-based reply for normal-value question",
-      );
-      console.log("[AIService] metricsReply:", metricsReply);
-    }
-    return {
-      reply: metricsReply,
-      chatbot_active: true,
-      detected_language: effectiveLanguage,
-      usage: null,
-    };
-  }
+interface ModelRunOptions {
+  contents: ReturnType<typeof chatServiceHelpers.buildCompletionContents>;
+  language: SupportedLanguage;
+  refusalText: string;
+  patientContext: PatientContext | undefined;
+  healthContext: string | undefined;
+  debugEnabled: boolean;
+}
 
-  let completion = null as Awaited<ReturnType<typeof createCompletion>> | null;
+/**
+ * Tries each model in order, falling back on rate-limit / retryable errors.
+ * Returns the first successful completion, or a busy-reply object if all 3
+ * models are exhausted.
+ */
+const runModelWithFallback = async (
+  options: ModelRunOptions,
+): Promise<
+  | { kind: "completion"; value: Awaited<ReturnType<typeof createCompletion>> }
+  | { kind: "busy" }
+> => {
+  const {
+    contents,
+    language,
+    refusalText,
+    patientContext,
+    healthContext,
+    debugEnabled,
+  } = options;
+
   let lastError: unknown;
 
-  for (const model of modelsToTry) {
-    try {
-      if (debugEnabled) {
-        console.log("[AIService] attemptingModel:", model);
-      }
+  for (const model of MODELS_TO_TRY) {
+    if (debugEnabled) console.log("[AIService] attemptingModel:", model);
 
-      completion = await chatServiceHelpers.withTimeout(
+    try {
+      const value = await chatServiceHelpers.withTimeout(
         createCompletion(model, {
           contents,
-          language: effectiveLanguage,
+          language,
           refusalText,
           patientContext,
           healthContext,
         }),
-        50000,
+        MODEL_TIMEOUT_MS,
       );
 
-      if (debugEnabled) {
-        console.log("[AIService] completion.text:", completion.text);
-      }
+      if (debugEnabled) console.log("[AIService] completion.text:", value.text);
 
-      break;
+      return { kind: "completion", value };
     } catch (error) {
       lastError = error;
       const status = chatServiceHelpers.getUpstreamStatus(error);
@@ -197,51 +172,169 @@ export const generateChatReply = async (
       }
 
       if (error instanceof Error && error.message === "LLM timeout") {
-        return {
-          reply: busyText,
-          chatbot_active: false,
-          detected_language: effectiveLanguage,
-          usage: null,
-        };
+        return { kind: "busy" };
       }
 
-      if (status === 429) {
-        break;
+      if (
+        status === 429 ||
+        chatServiceHelpers.isRetryableUpstreamStatus(status)
+      ) {
+        continue; // try next model
       }
 
-      if (chatServiceHelpers.isRetryableUpstreamStatus(status)) {
-        continue;
-      }
-
-      throw error;
+      throw error; // non-retryable — bubble up immediately
     }
   }
 
-  if (!completion) {
-    const finalStatus = chatServiceHelpers.getUpstreamStatus(lastError);
-    if (finalStatus === 429 || finalStatus === 503) {
-      return {
-        reply: busyText,
-        chatbot_active: false,
-        detected_language: effectiveLanguage,
-        usage: null,
-      };
-    }
-
-    throw lastError ?? new Error("Failed to generate completion");
+  // All models exhausted
+  const finalStatus = chatServiceHelpers.getUpstreamStatus(lastError);
+  if (finalStatus === 429 || finalStatus === 503) {
+    return { kind: "busy" };
   }
 
-  const medicationFallback = isMedicationRelated
+  throw lastError ?? new Error("Failed to generate completion");
+};
+
+// Post-processing
+const postProcessReply = (
+  rawReply: string | undefined,
+  patientContext: PatientContext | undefined,
+  healthContext: string | undefined,
+  cleanMessage: string,
+): string | undefined => {
+  if (!rawReply) return rawReply;
+
+  return stripUnsupportedConditionMentions(
+    stripUnsupportedSourceClaims(
+      stripInventedGreeting(rawReply, patientContext),
+      healthContext,
+    ),
+    patientContext,
+    cleanMessage,
+  );
+};
+
+// Main entrypoint
+export const generateChatReply = async (
+  message: ChatContent,
+  language?: string,
+  history?: ChatHistoryItem[],
+  patientContext?: PatientContext,
+  healthContext?: string,
+): Promise<ChatReply> => {
+  // --- Normalise inputs ---
+  const cleanMessage = message.trim();
+  const safeHistory = chatServiceHelpers.normalizeHistory(history ?? []);
+  const conversationContext = chatServiceHelpers.buildConversationContext(
+    cleanMessage,
+    safeHistory,
+  );
+
+  // --- Language resolution ---
+  let historyLanguage: SupportedLanguage | undefined;
+  for (let i = safeHistory.length - 1; i >= 0; i--) {
+    if (safeHistory[i].role === "patient" && safeHistory[i].content) {
+      historyLanguage = chatServiceHelpers.resolveEffectiveLanguage({
+        requestedLanguage: language,
+        message: safeHistory[i].content,
+      });
+      break;
+    }
+  }
+
+  const effectiveLanguage = chatServiceHelpers.resolveEffectiveLanguage({
+    requestedLanguage: language,
+    historyLanguage,
+    message: cleanMessage,
+  });
+
+  // --- Shared text lookups ---
+  const busyText = getLocalizedText("busy", effectiveLanguage);
+  const refusalText = getLocalizedText("refusal", effectiveLanguage);
+  const unsupportedDiagnosisText = getLocalizedText(
+    "unsupported",
+    effectiveLanguage,
+  );
+
+  const debugEnabled =
+    process.env.AI_DEBUG_LOGS === "true" ||
+    process.env.NODE_ENV !== "production";
+
+  // --- Classify ---
+  const flags = classifyMessage(
+    cleanMessage,
+    conversationContext,
+    patientContext,
+  );
+
+  if (debugEnabled) {
+    console.log("\n=== AI SERVICE DEBUG ===");
+    console.log("[AIService] cleanMessage:", cleanMessage);
+    console.log("[AIService] flags:", JSON.stringify(flags));
+    console.log("[AIService] patientContext:", JSON.stringify(patientContext));
+    console.log("======================\n");
+  }
+
+  // --- Early returns ---
+  if (!flags.asksNormalValueQuestion && flags.asksUnsupportedDiagnosis) {
+    return {
+      reply:
+        unsupportedDiagnosisText ||
+        refusalText ||
+        "Sorry, I cannot answer that question.",
+      chatbot_active: false,
+      detected_language: effectiveLanguage,
+      usage: null,
+    };
+  }
+
+  if (flags.asksNormalValueQuestion) {
+    const metricsReply = buildNormalValueReply(cleanMessage, effectiveLanguage);
+    if (debugEnabled) console.log("[AIService] metricsReply:", metricsReply);
+    return {
+      reply: metricsReply,
+      chatbot_active: true,
+      detected_language: effectiveLanguage,
+      usage: null,
+    };
+  }
+
+  // --- LLM call with model fallback ---
+  const contents = chatServiceHelpers.buildCompletionContents(
+    safeHistory,
+    cleanMessage,
+  );
+
+  const result = await runModelWithFallback({
+    contents,
+    language: effectiveLanguage,
+    refusalText,
+    patientContext,
+    healthContext,
+    debugEnabled,
+  });
+
+  if (result.kind === "busy") {
+    return {
+      reply: busyText,
+      chatbot_active: false,
+      detected_language: effectiveLanguage,
+      usage: null,
+    };
+  }
+
+  const completion = result.value;
+  const medicationFallback = flags.isMedicationRelated
     ? chatServiceHelpers.buildMedicationFallback(effectiveLanguage)
     : null;
 
-  if (!completion.text && isMedicationRelated) {
+  // Empty response on a medication question — return fallback immediately
+  if (!completion.text && flags.isMedicationRelated) {
     if (debugEnabled) {
       console.log(
-        "[AIService] completion.text is undefined; returning medicationFallback",
+        "[AIService] Empty completion for medication question; using fallback",
       );
     }
-
     return {
       reply:
         medicationFallback ??
@@ -253,36 +346,33 @@ export const generateChatReply = async (
     };
   }
 
-  const rawReply = completion.text?.trim();
-  const normalizedReply = rawReply
-    ? stripUnsupportedConditionMentions(
-        stripUnsupportedSourceClaims(
-          stripInventedGreeting(rawReply, patientContext),
-          healthContext,
-        ),
-        patientContext,
-        cleanMessage,
-      )
-    : rawReply;
+  // --- Post-processing ---
+  const normalizedReply = postProcessReply(
+    completion.text?.trim(),
+    patientContext,
+    healthContext,
+    cleanMessage,
+  );
 
   const finalReply = chatServiceHelpers.resolveFinalReply({
     rawReply: normalizedReply,
     refusalText,
-    isMedicationRelated,
-    isGeneralEducation,
+    isMedicationRelated: flags.isMedicationRelated,
+    isGeneralEducation: flags.isGeneralEducation,
     medicationFallback,
   });
+
   const isRefusal = normalizedReply === refusalText;
 
   if (debugEnabled) {
-    console.log("[AIService] rawReply:", rawReply);
-    console.log("[AIService] reply:", normalizedReply);
-    console.log("[AIService] finalReply:", finalReply);
+    console.log("[AIService] rawReply:", completion.text?.trim());
+    console.log("[AIService] normalized:", normalizedReply);
+    console.log("[AIService] final:", finalReply);
   }
 
   return {
     reply: finalReply || "Sorry, I couldn't generate a response.",
-    chatbot_active: !isRefusal && isGeneralEducation,
+    chatbot_active: !isRefusal && flags.isGeneralEducation,
     detected_language: effectiveLanguage,
     usage: completion.usageMetadata,
   };

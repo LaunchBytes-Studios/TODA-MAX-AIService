@@ -1,5 +1,14 @@
 import { gemini } from "../utils/lib/gemini";
 import { PatientContext } from "../types/patient";
+import { normalizeGeminiResponse } from "./gemini-response.adapter";
+
+type CompletionParams = {
+  contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }>;
+  language: string;
+  refusalText: string;
+  patientContext?: PatientContext;
+  healthContext?: string;
+};
 
 // Inlined helpers from prompt-builder.ts
 function getDiagnosisScope(patient?: PatientContext): string {
@@ -41,20 +50,15 @@ function formatPatientContext(patient?: PatientContext): string {
 
 export async function createCompletion(
   model: string,
-  params: {
-    contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }>;
-    language: string;
-    refusalText: string;
-    patientContext?: PatientContext;
-    healthContext?: string;
-  },
+  params: CompletionParams,
 ) {
+  const replyLanguage = params.language || "english";
   const res = await gemini.models.generateContent({
     model,
     contents: params.contents,
     config: {
       systemInstruction: buildPlainSystemPrompt(
-        params.language || "english",
+        replyLanguage,
         params.refusalText,
         params.patientContext,
         params.healthContext,
@@ -64,77 +68,7 @@ export async function createCompletion(
       responseMimeType: "text/plain",
     },
   });
-
-  // Normalize the varying shapes of responses from the Gemini client into a
-  // stable object with `text` and `usageMetadata` so callers don't need to
-  // handle many edge cases. Use `unknown` and narrow types to avoid `any`.
-  const resObj = res as unknown as Record<string, unknown>;
-  let text: string | undefined = undefined;
-
-  // Newer SDKs sometimes expose `outputText` as a string
-  if (
-    typeof resObj["outputText"] === "string" &&
-    (resObj["outputText"] as string).trim()
-  ) {
-    text = (resObj["outputText"] as string).trim();
-  }
-
-  // Older / alternate shapes may include `candidates` with `content` parts
-  if (!text && Array.isArray(resObj["candidates"])) {
-    const candidates = resObj["candidates"] as unknown[];
-    if (candidates.length) {
-      const cand = candidates[0] as unknown;
-      if (typeof (cand as Record<string, unknown>)["outputText"] === "string") {
-        text = (
-          (cand as Record<string, unknown>)["outputText"] as string
-        ).trim();
-      } else if (Array.isArray((cand as Record<string, unknown>)["content"])) {
-        const parts = (cand as Record<string, unknown>)["content"] as unknown[];
-        text = parts
-          .map(
-            (p) =>
-              (typeof p === "object" && p !== null
-                ? ((p as Record<string, unknown>)["text"] as string)
-                : "") || "",
-          )
-          .join("")
-          .trim();
-      }
-    }
-  }
-
-  // Some responses use `output` with content arrays
-  if (!text && Array.isArray(resObj["output"])) {
-    const output = resObj["output"] as unknown[];
-    if (output.length) {
-      const first = output[0] as Record<string, unknown> | undefined;
-      if (first) {
-        if (Array.isArray(first["content"])) {
-          const parts = first["content"] as unknown[];
-          text = parts
-            .map(
-              (p) =>
-                (typeof p === "object" && p !== null
-                  ? ((p as Record<string, unknown>)["text"] as string)
-                  : "") || "",
-            )
-            .join("")
-            .trim();
-        }
-        if (!text && typeof first["text"] === "string") {
-          text = (first["text"] as string).trim();
-        }
-      }
-    }
-  }
-
-  // Fallback: try the top-level `text` property if present
-  if (!text && typeof resObj["text"] === "string") {
-    text = (resObj["text"] as string).trim();
-  }
-
-  // Extract usage metadata if present (don't expose full raw response)
-  const usageMetadata = resObj["usage"] ?? resObj["usageMetadata"] ?? null;
+  const { text, usageMetadata } = normalizeGeminiResponse(res);
 
   return {
     // `text` may be undefined when the upstream response has no usable text
