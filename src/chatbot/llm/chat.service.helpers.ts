@@ -8,6 +8,9 @@ import {
 import { medicationFallbackReplies } from "../utils/reply-texts";
 import { SupportedLanguage } from "../types/language";
 
+const MAX_HISTORY_MESSAGES = 3;
+const LLM_TIMEOUT_MESSAGE = "LLM timeout";
+
 export type ChatRole = "patient" | "chatbot";
 export type GeminiAiRole = "user" | "model";
 
@@ -21,6 +24,9 @@ type GeminiContent = {
   parts: Array<{ text: string }>;
 };
 
+const mapChatRoleToGeminiRole = (role: ChatRole): GeminiAiRole =>
+  role === "patient" ? "user" : "model";
+
 export const normalizeHistory = (
   history: { role: string; content: string }[],
 ): ChatHistoryItem[] => {
@@ -28,10 +34,10 @@ export const normalizeHistory = (
   return history
     .map((item) => ({
       role: item.role as ChatRole,
-      content: item.content.trim(),
+      content: typeof item.content === "string" ? item.content.trim() : "",
     }))
     .filter((item) => item.content)
-    .slice(-3);
+    .slice(-MAX_HISTORY_MESSAGES);
 };
 
 export const buildConversationContext = (
@@ -72,7 +78,7 @@ export const buildCompletionContents = (
 ): GeminiContent[] => {
   // keep only the latest few messages so the prompt stays focused.
   const mappedHistory = history.map((item) => ({
-    role: item.role === "patient" ? ("user" as const) : ("model" as const),
+    role: mapChatRoleToGeminiRole(item.role),
     parts: [{ text: item.content }],
   }));
 
@@ -111,7 +117,7 @@ export const isRetryableUpstreamStatus = (status: number | null): boolean => {
 export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   // keep only the status code when the upstream error actually has one.
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("LLM timeout")), ms);
+    const timer = setTimeout(() => reject(new Error(LLM_TIMEOUT_MESSAGE)), ms);
     promise
       .then((value) => {
         clearTimeout(timer);
@@ -137,10 +143,6 @@ export const resolveFinalReply = ({
   isGeneralEducation: boolean;
   medicationFallback: string | null;
 }): string | undefined => {
-  if (!rawReply) {
-    return rawReply;
-  }
-
   const isRefusal = rawReply === refusalText;
 
   if (isMedicationRelated && isRefusal) {
