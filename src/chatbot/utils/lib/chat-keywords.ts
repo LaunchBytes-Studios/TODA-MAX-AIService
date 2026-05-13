@@ -63,6 +63,15 @@ export const healthKeywordPatterns = [
   "hypoglycemia",
   "hyperglycemia",
   "hypertensive",
+  "exercise",
+  "workout",
+  "physical activity",
+  "sport",
+  "activity",
+  "olahraga",
+  "ehersisyo",
+  "aktibidad",
+  "pagsisikap",
 ];
 
 export const diabetesKeywordPatterns = [
